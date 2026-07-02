@@ -1,244 +1,230 @@
-# Roadmap: L1+L2 Verifier для copy-space/DPF
+# Roadmap
 
-**Репозиторий**: `/home/user/work/smartcontract-verifier/`
-**Цель**: верификатор memory-safety (L1) + strict conflict-free scheduler (L2) для образов пространства.
-**Основание**: документировано в `doc/roadmap.md` (п. 1-2) — проверка согласованности пространства.
+**Project**: `space-verifier` — formal verifier (L1 + L2) for a single-instruction smart contract VM.  
+**Repository**: `/home/user/work/smartcontract-verifier/`
 
 ---
 
-## Статус
+## Status
 
-| Компонент | Статус | Примечание |
+| Component | Status | Notes |
 |---|---|---|
-| L1: Memory-Safety Checker | ✅ Реализован | boundary + protected + allowed regions |
-| L2: Conflict-Free Checker (strict) | ✅ Реализован | DDAS Contract v1 full strict non-overlap |
-| Snapshot utility | ✅ Реализован | save/load тестовых фикстур |
-| CLI `spaces-verify` | ✅ Реализован | L1+L2, JSON/text, CI-ready exit codes |
-| Тесты | ✅ 18 тестов | все проходят |
-| docs/ | ❌ usage.md, format.md | запланированы |
-
----
-
-## Ключевые изменения по сравнению с первой версией
-
-### L2 — апгрейд до Strict Non-Overlap (DDAS Contract v1)
-
-Первая версия проверяла **только dst∩dst**. Текущая версия заимствует алгоритм из `ddas/src/core/strict_validator.c` (56 строк C) и проверяет:
-
-1. **Self-overlap**: `[src, src+n) ∩ [dst, dst+n)` одной инструкции — недопустимо.
-2. **Src∩Src**: source-интервалы двух разных инструкций — недопустимо.
-3. **Dst∩Dst**: destination-интервалы — недопустимо.
-4. **Src∩Dst / Dst∩Src**: cross-overlap — недопустимо.
-5. **Scan-line O(K log K)**: сортировка всех интервалов + линейный проход.
-
-**Спецификация**: `ddas/doc/address_space_contract_v1.md` — «In a single Tick, no bit position may belong to more than one half-open interval participating in copy operations.»
-
-### Snapshot utility
-
-Адаптация `ddas/src/core/snapshot.c` для Python:
-- `save_snapshot(tick, space_data, path)` — запись снапшота.
-- `load_snapshot(path)` → `(tick, space_data)` — чтение.
-- `make_fixture(instrs, slot_size, space_bytes)` — генерация тестового образа.
+| L1: Memory-Safety Checker | ✅ Done | boundary + protected + allowed regions |
+| L2: Conflict-Free Checker | ✅ Done | strict non-overlap, 5 conflict types |
+| Snapshot utility | ✅ Done | save/load state, fixture generation |
+| CLI `spaces-verify` | ✅ Done | L1+L2, JSON/text, CI exit codes |
+| Tests | ✅ Done | 25 tests, all passing |
+| docs/ | ❌ Todo | usage.md, format.md |
 
 ---
 
 ## L1: Memory-Safety Checker
 
-**Цель**: проверить, что все инструкции `copy n, dst, src` в образе пространства:
-1. `dst + n <= SPACE_SIZE` — не выходят за границы пространства.
-2. `dst` НЕ попадает в защищённые регионы (PROCESSOR, MMIO, ART).
-3. `dst` попадает в разрешённый для контракта регион (scratch/workspace).
+**Goal**: verify that every `copy(n, dst, src)` instruction in a memory image satisfies:
 
-**Вход**: бинарный образ пространства (raw, тот же формат что у `vmrun --dump-space`).  
-**Выход**: PASS / FAIL + список нарушений (номер слота, tick, инструкция).
+1. `dst + n <= S` — no out-of-bounds write.
+2. `dst` does not fall into a protected region (code section, I/O area, config table).
+3. `dst` falls into a region allowed for the contract (workspace).
 
-### Задачи
+**Input**: binary memory image (raw dump of the VM state).  
+**Output**: PASS / FAIL + list of violations (slot, round, instruction).
 
-- `✅ L1.1. Определить формат образа`
-  - `✅ L1.1.1. Зафиксировать: образ = дамп `space` (VM_SPACE_BYTES байт)`
-  - `✅ L1.1.2. Зафиксировать: конфигурация SPACE_BITS, PROCESSOR_N, поле instr_bits читается из произвольного конфига или определяется автоматически (по умолчанию 512 КБ, 64 слота)`
+### Tasks
 
-- `✅ L1.2. Распарсить инструкции из образа`
-  - `✅ L1.2.1. Реализовать reader: по адресу слота (i * instr_bits) прочитать n, dst, src`
-  - `✅ L1.2.2. Поддержать разные instr_bits (выводятся из SPACE_BITS: addr_bits = round8(log2(SPACE_BITS)), n_bits = addr_bits)`
+- `✅ L1.1. Define image format`
+  - `✅ L1.1.1. Fixed: image = memory dump (VM_MEMORY_SIZE bytes)`
+  - `✅ L1.1.2. Fixed: configuration MEMORY_BITS, CONTRACT_COUNT, instruction bit-width read from config or auto-detected (default 512 KiB, 64 slots)`
 
-- `✅ L1.3. Определить защищённые регионы`
-  - `✅ L1.3.1. PROCESSOR: [0, PROCESSOR_BITS) — инструкции, нельзя писать сюда (или можно, но с флагом)`
-  - `✅ L1.3.2. MMIO: [PROCESSOR_BITS, WORKSPACE_BASE) — канальные handshake-регистры`
-  - `✅ L1.3.3. ART: если присутствует — регион ART-таблицы (конфигурируемая область)`
-  - `✅ L1.3.4. Scratch (TESTSCR): [TESTSCR_BASE, TESTSCR_END) — разрешённый регион записи для контракта`
-  - `✅ L1.3.5. Внешний конфиг: JSON/YAML с описанием protected_regions[] и allowed_regions[]`
+- `✅ L1.2. Parse instructions from image`
+  - `✅ L1.2.1. Implement reader: at slot address (i * instr_bits) read n, dst, src`
+  - `✅ L1.2.2. Support variable instr_bits (derived from MEMORY_BITS: addr_bits = round8(log2(MEMORY_BITS)), n_bits = addr_bits)`
 
-- `✅ L1.4. Реализовать проверки`
-  - `✅ L1.4.1. boundary_check(dst, n): dst + n <= SPACE_BITS`
+- `✅ L1.3. Define protected regions`
+  - `✅ L1.3.1. CODE: [0, CODE_BITS) — instruction area, writes forbidden`
+  - `✅ L1.3.2. IO: [CODE_BITS, WORKSPACE_BASE) — channel handshake registers`
+  - `✅ L1.3.3. CONFIG_TABLE: if present — configuration table region (configurable)`
+  - `✅ L1.3.4. HEAP (WORKSPACE): [HEAP_BASE, HEAP_END) — allowed write region for contracts`
+  - `✅ L1.3.5. External JSON config: protected_regions[] and allowed_regions[]`
+
+- `✅ L1.4. Implement checks`
+  - `✅ L1.4.1. boundary_check(dst, n): dst + n <= MEMORY_BITS`
   - `✅ L1.4.2. protected_check(dst, n): [dst, dst+n) ∩ protected_regions == ∅`
-  - `✅ L1.4.3. allowed_check(dst, n): [dst, dst+n) ⊆ allowed_regions (если регионы заданы)`
+  - `✅ L1.4.3. allowed_check(dst, n): [dst, dst+n) ⊆ allowed_regions (if configured)`
 
-- `✅ L1.5. Собрать отчёт`
-  - `✅ L1.5.1. Формат отчёта: JSON {status, violations: [{tick, slot, n, dst, src, reason}]}`
-  - `✅ L1.5.2. Человекочитаемый вывод с цветами (PASS/FAIL, красный/зелёный)`
+- `✅ L1.5. Report`
+  - `✅ L1.5.1. JSON format: {status, violations: [{round, slot, n, dst, src, reason}]}`
+  - `✅ L1.5.2. Human-readable output with colors`
 
-- `✅ L1.6. Тесты`
-  - `✅ L1.6.1. Тест: корректный образ (ни одного нарушения)`
-  - `✅ L1.6.2. Тест: dst+ n > SPACE_BITS (ожидается FAIL)`
-  - `✅ L1.6.3. Тест: dst в PROCESSOR (ожидается FAIL)`
-  - `✅ L1.6.4. Тест: dst в MMIO (ожидается FAIL)`
-  - `✅ L1.6.5. Тест: пустой образ (все NOP) — PASS`
-  - `✅ L1.6.6. Тест: с реальным образом add24 (из DPF) — PASS`
+- `✅ L1.6. Tests`
+  - `✅ L1.6.1. Valid image (no violations)`
+  - `✅ L1.6.2. dst + n > MEMORY_BITS (expect FAIL)`
+  - `✅ L1.6.3. dst in CODE region (expect FAIL)`
+  - `✅ L1.6.4. dst in IO region (expect FAIL)`
+  - `✅ L1.6.5. Empty image (all NOP) — PASS`
+  - `✅ L1.6.6. Real contract bytecode — PASS (TBD: generate fixtures)`
 
 ---
 
-## L2: Strict Non-Overlap Checker (DDAS Contract v1)
+## L2: Strict Non-Overlap Checker
 
-**Цель**: проверить, что внутри каждого tick (слоя) ни один бит пространства не принадлежит более чем одному полуинтервалу `copy(n, dst, src)`.
+**Goal**: verify that within each execution round, no bit belongs to more than one
+`copy(n, dst, src)` interval.
 
-**Спецификация**: `/home/user/work/ddas/doc/address_space_contract_v1.md`
-
-**Инвариант (п. 3.1-3.3)**:
-> In a single Tick, no bit position may belong to more than one half-open interval participating in copy operations.
+**Invariant**:
+> In a single round, no bit position may belong to more than one
+> half-open interval participating in `copy` operations.
 > This applies to all source and destination intervals.
 > Therefore:
 >   - Any instruction whose source and destination overlap is invalid.
->   - Any two instructions overlapping in any position are invalid.
+>   - Any two instructions overlapping in any position is invalid.
 
-**Алгоритм** (заимствован из `ddas/src/core/strict_validator.c`, 56 строк C):
-1. Для каждой не-NOP инструкции: проверить self-overlap `[src, src+n) ∩ [dst, dst+n)`.
-2. Добавить оба интервала `[src, src+n)` и `[dst, dst+n)` в общий список.
-3. Отсортировать все интервалы по `(start, end)`.
-4. Scan-line: если `intervals[i].start < intervals[i-1].end` → конфликт.
+**Algorithm**:
+1. For each non-NOP instruction: check self-overlap `[src, src+n) ∩ [dst, dst+n)`.
+2. Collect both intervals `[src, src+n)` and `[dst, dst+n)` into a list.
+3. Sort all intervals by `(start, end)`.
+4. Scan: if `intervals[i].start < intervals[i-1].end` → conflict.
 
-**Сложность**: O(K log K) на tick, где K = 2 × (число не-NOP инструкций).
+**Complexity**: O(K log K) per round, where K = 2 × active contracts.
 
-**Типы конфликтов**:
-| Тип | Описание |
+**Conflict types**:
+
+| Type | Description |
 |---|---|
-| `self-src-dst` | src и dst одной инструкции пересекаются |
-| `src-src` | src двух разных инструкций пересекаются |
-| `dst-dst` | dst двух разных инструкций пересекаются |
-| `src-dst` | src инструкции A пересекает dst инструкции B |
-| `dst-src` | dst инструкции A пересекает src инструкции B |
+| `self-src-dst` | src and dst of the same instruction overlap |
+| `src-src` | src intervals of two different instructions overlap |
+| `dst-dst` | dst intervals of two different instructions overlap |
+| `src-dst` | src of instruction A overlaps dst of instruction B |
+| `dst-src` | dst of instruction A overlaps src of instruction B |
 
-**Вход**: мульти-слойный образ (последовательность слоёв, каждый — полный набор из PROCESSOR_N инструкций).  
-**Выход**: PASS / FAIL + список конфликтов (tick, пара слотов, тип, перекрывающийся диапазон).
+**Input**: multi-round trace (sequence of memory images, one per execution round).  
+**Output**: PASS / FAIL + list of conflicts (round, slot pair, type, overlapping range).
 
-### Задачи
+### Tasks
 
-- `✅ L2.1. Определить формат мульти-слойного образа`
-  - `✅ L2.1.1. Вариант A: один файл = один слой (последовательность файлов)`
-  - `✅ L2.1.2. Вариант B: образ = цепочка (каждый слой — отдельное пространство, связанное chain-load)`
-  - `✅ L2.1.3. Принять вариант A: каждый `space.dump` — один tick, имена файлов `layer_0000.bin`, `layer_0001.bin``
+- `✅ L2.1. Define multi-round format`
+  - `✅ L2.1.1. Option A: one file = one round (sequence of files)`
+  - `✅ L2.1.2. Option B: one file = chain of rounds (linked by chain-load)`
+  - `✅ L2.1.3. Adopted: Option A, file naming: round_0000.bin, round_0001.bin, ...`
 
-- `✅ L2.2. Алгоритм полного non-overlap (DDAS strict)`
-  - `✅ L2.2.1. Для каждой не-NOP инструкции: generate интервалы [src, src+n) и [dst, dst+n)`
-  - `✅ L2.2.2. Проверить self-overlap: src ∩ dst одной инструкции`
-  - `✅ L2.2.3. Сортировка всех интервалов по start`
-  - `✅ L2.2.4. Scan-line: interval[i].start < interval[i-1].end → conflict`
-  - `✅ L2.2.5. Классификация конфликта по типу (src/src/dst/dst/src/cross/self)`
+- `✅ L2.2. Strict non-overlap algorithm`
+  - `✅ L2.2.1. For each non-NOP: generate intervals [src, src+n) and [dst, dst+n)`
+  - `✅ L2.2.2. Check self-overlap: src ∩ dst of the same instruction`
+  - `✅ L2.2.3. Sort all intervals by start`
+  - `✅ L2.2.4. Scan: interval[i].start < interval[i-1].end → conflict`
+  - `✅ L2.2.5. Classify conflict type (src/src, dst/dst, cross, self)`
 
-- `✅ L2.3. Оптимизация`
-  - `✅ L2.3.1. Scan-line O(K log K) — включён в реализацию`
-  - `✅ L2.3.2. Interval tree — опционально для N > 4096`
+- `✅ L2.3. Optimization`
+  - `✅ L2.3.1. Scan-line O(K log K) — implemented`
+  - `✅ L2.3.2. Interval tree — optional for N > 4096`
 
-- `✅ L2.4. Собрать отчёт`
-  - `✅ L2.4.1. Формат: JSON {status, conflicts: [{tick, slot_a, slot_b, kind, overlap_begin, overlap_end}]}`
-  - `✅ L2.4.2. Человекочитаемый вывод с указанием типа пересечения`
+- `✅ L2.4. Report`
+  - `✅ L2.4.1. JSON format: {status, conflicts: [{round, slot_a, slot_b, kind, overlap_begin, overlap_end}]}`
+  - `✅ L2.4.2. Human-readable output with conflict type labels`
 
-- `✅ L2.5. Тесты`
-  - `✅ L2.5.1. Тест: слой без конфликтов (PASS)`
-  - `✅ L2.5.2. Тест: два слота пишут в один dst (FAIL)`
-  - `✅ L2.5.3. Тест: частичное перекрытие dst (FAIL)`
-  - `✅ L2.5.4. Тест: src-конфликт (FAIL — strict mode)`
-  - `✅ L2.5.5. Тест: self-overlap src∩dst (FAIL)`
-  - `✅ L2.5.6. Тест: cross-overlap src∩dst разных слотов (FAIL)`
-  - `✅ L2.5.7. Тест: реальный образ add24 из DPF (TBD при генерации фикстур)`
+- `✅ L2.5. Tests`
+  - `✅ L2.5.1. Round with no conflicts (PASS)`
+  - `✅ L2.5.2. Two slots write to same dst (FAIL)`
+  - `✅ L2.5.3. Partial dst overlap (FAIL)`
+  - `✅ L2.5.4. Source conflict src∩src (FAIL — strict mode)`
+  - `✅ L2.5.5. Self-overlap src∩dst of same contract (FAIL)`
+  - `✅ L2.5.6. Cross-overlap src of A ∩ dst of B (FAIL)`
+  - `✅ L2.5.7. Real contract bytecode (TBD: generate fixtures)`
 
 ---
 
 ## Snapshot Utility
 
-**Адаптация**: `ddas/src/core/snapshot.c` → `src/snapshot.py`
-
-- `✅ SNAP.1. save_snapshot(tick, space_data, path)` — бинарный снапшот.
-- `✅ SNAP.2. load_snapshot(path) → (tick, space_data)` — чтение.
-- `✅ SNAP.3. make_fixture(instrs, slot_size, space_bytes)` — генерация тестового образа из списка инструкций.
-- `❌ SNAP.4. Интеграция в тесты с реальными образами DPF (add24.bin, life.bin)`
+- `✅ SNAP.1. save_snapshot(round, memory_data, path)` — binary snapshot write.
+- `✅ SNAP.2. load_snapshot(path) → (round, memory_data)` — binary snapshot read.
+- `✅ SNAP.3. make_fixture(instructions, slot_size, memory_size)` — generate test image from instruction list.
+- `❌ SNAP.4. Integrate with real contract bytecode fixtures`
 
 ---
 
-## Интеграция (L1 + L2)
+## Integration (L1 + L2)
 
-- `✅ INT.1. Объединить L1 и L2 в один инструмент: `spaces-verify``
-  - `✅ INT.1.1. CLI: `spaces-verify --layers layer_*.bin --config verify.json``
-  - `✅ INT.1.2. Сначала L1 на каждом слое, потом L2 на всей последовательности`
+- `✅ INT.1. Unified CLI: spaces-verify`
+  - `✅ INT.1.1. spaces-verify --layers round_*.bin --config verify.json`
+  - `✅ INT.1.2. Runs L1 on each round, then L2 on the full sequence`
 
 - `✅ INT.2. CI-ready`
-  - `✅ INT.2.1. Exit code: 0 = PASS, 1 = FAIL, 2 = ошибка парсинга`
-  - `✅ INT.2.2. JSON-отчёт пригоден для CI артефактов`
+  - `✅ INT.2.1. Exit code: 0 = PASS, 1 = FAIL, 2 = parse error`
+  - `✅ INT.2.2. JSON report suitable for CI artifacts`
 
-- `❌ INT.3. Документация`
-  - `❌ INT.3.1. docs/usage.md — как запускать`
-  - `❌ INT.3.2. docs/format.md — формат конфига и образа`
+- `❌ INT.3. Documentation`
+  - `❌ INT.3.1. docs/usage.md`
+  - `❌ INT.3.2. docs/format.md`
   - `❌ INT.3.3. README.md — overview`
 
 ---
 
-## Выбор языка
+## Design decisions
 
-| Критерий | Python | C | Rust |
+### Language choice: Python
+
+| Criterion | Python | C | Rust |
 |---|---|---|---|
-| Скорость разработки | ✅ (дни) | 🟡 (недели) | 🟡 (недели) |
-| Производительность | 🟡 (достаточно) | ✅ | ✅ |
-| Пригодность для CI | 🟡 (требует py env) | ✅ | ✅ |
-| Чтение бинарных образов | struct.unpack / numpy | ✅ memcpy | ✅ |
-| Работа с SMT (будущее) | ✅ Z3.py | ❌ | 🟡 (z3-sys) |
+| Development speed | ✅ (days) | 🟡 (weeks) | 🟡 (weeks) |
+| Performance | 🟡 (sufficient) | ✅ | ✅ |
+| CI readiness | 🟡 (needs Python) | ✅ | ✅ |
+| Binary image parsing | struct / numpy | ✅ memcpy | ✅ |
+| Future SMT integration | ✅ Z3.py | ❌ | 🟡 (z3-sys) |
 
-**Решение**: Python + `argparse` + `struct` (никаких зависимостей, кроме stdlib).  
-Если в будущем понадобится SMT — Z3.py подключается безболезненно.
+**Decision**: Python + `argparse` + `struct` (stdlib only, zero external dependencies).  
+If SMT is ever needed, Z3.py can be added without friction.
+
+### Why a single instruction VM?
+
+The entire project hinges on one observation: **a single-instruction VM with flat memory
+makes formal verification trivial**. The TCB (trusted computing base) is ~390 lines of C.
+For comparison, verifying memory safety in EVM requires an SMT solver and expert-written
+invariants. Here, it's a single loop over the instructions.
+
+This is not a production VM — it's a research prototype that asks:
+*what if we designed a VM for verifiability first?*
 
 ---
 
-## Оценка времени (обновлённая)
+## Estimated effort
 
-| Компонент | Время | Статус |
+| Component | Time | Status |
 |---|---|---|
-| L1 (memory-safety) | 4 дня | ✅ |
-| L2 (strict non-overlap) | 3 дня (включая апгрейд) | ✅ |
-| Snapshot | 1 день | ✅ |
-| Интеграция | 2 дня | ✅ (кроме docs) |
-| **Total** | **~10 дней** | **~90%** |
+| L1 (memory safety) | 4 days | ✅ |
+| L2 (strict non-overlap) | 3 days | ✅ |
+| Snapshot | 1 day | ✅ |
+| Integration | 2 days | ✅ (except docs) |
+| **Total** | **~10 days** | **~90%** |
 
 ---
 
-## Файловая структура
+## File structure
 
 ```
 smartcontract-verifier/
-├── README.md                    # ❌ (todo)
-├── roadmap.md                   # ✅ этот файл
+├── README.md                    # ✅ (rewritten)
+├── roadmap.md                   # ✅ this file
 ├── docs/                        # ❌ (todo)
 │   ├── usage.md
 │   └── format.md
 ├── src/
 │   ├── __init__.py              # ✅
-│   ├── spaces_verify.py         # ✅ MAIN: парсинг аргументов, диспетчеризация
-│   ├── image_reader.py          # ✅ L1.2: чтение инструкций из образа
-│   ├── config.py                # ✅ L1.3: конфиг регионов
-│   ├── memory_check.py          # ✅ L1.4: memory-safety проверки
-│   ├── conflict_check.py        # ✅ L2.2: strict non-overlap (DDAS v1)
+│   ├── spaces_verify.py         # ✅ CLI entry point
+│   ├── image_reader.py          # ✅ binary image parser
+│   ├── config.py                # ✅ memory layout configuration
+│   ├── memory_check.py          # ✅ L1: memory safety
+│   ├── conflict_check.py        # ✅ L2: strict non-overlap
 │   ├── snapshot.py              # ✅ save/load/fixture generation
-│   └── report.py                # ✅ L1.5+L2.4: отчёт
+│   └── report.py                # ✅ report formatting
 ├── tests/
 │   ├── __init__.py
-│   ├── test_image_reader.py     # ✅
-│   ├── test_memory_check.py     # ✅
-│   ├── test_conflict_check.py   # ✅ (обновлён: strict mode)
+│   ├── test_conflict_check.py   # ✅ 13 tests
+│   ├── test_image_reader.py     # ✅ 4 tests
+│   ├── test_memory_check.py     # ✅ 8 tests
 │   ├── test_snapshot.py         # ❌ (todo)
 │   └── fixtures/
-│       ├── empty.bin            # ✅
+│       ├── sample.bin           # ❌ (sample fixture)
 │       ├── oob_dst.bin          # ✅
-│       ├── conflict_same_dst.bin# ✅
-│       ├── add24_layer_0.bin    # ❌ (todo)
-│       └── add8_layer_0.bin     # ❌ (todo)
+│       └── conflict_same_dst.bin# ✅
 └── config/
     └── default_config.json      # ✅
 ```

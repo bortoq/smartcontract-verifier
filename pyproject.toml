@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "space-verifier"
 version = "0.1.0"
-description = "L1+L2 verifier for copy-space/DPF address space images"
+description = "Two-layer formal verifier (L1 memory safety + L2 conflict freedom) for a single-instruction smart contract VM"
 requires-python = ">=3.10"
 
 [project.scripts]
