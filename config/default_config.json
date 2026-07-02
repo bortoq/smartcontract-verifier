@@ -1,0 +1,12 @@
+{
+  "space_bytes": 524288,
+  "processor_n": 64,
+  "addr_bits": null,
+  "protected_regions": [
+    {"name": "PROCESSOR", "begin": 0, "end": null},
+    {"name": "MMIO", "begin": null, "end": null}
+  ],
+  "allowed_regions": [
+    {"name": "TESTSCR", "begin": null, "end": null}
+  ]
+}
