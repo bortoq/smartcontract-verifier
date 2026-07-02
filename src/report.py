@@ -5,6 +5,10 @@ import json
 from .memory_check import MemoryCheckResult, Violation
 from .conflict_check import ConflictCheckResult, Conflict
 
+__all__ = [
+    "ReportBuilder",
+]
+
 
 def violations_to_dict(violations: list[Violation]) -> list[dict]:
     return [
@@ -109,10 +113,9 @@ class ReportBuilder:
                 lines.append("    ✅ No conflicts")
 
         lines.append("=" * 60)
-        overall = "PASS" if all(
-            (not self.memory or self.memory.status == "PASS") and
-            (not self.conflict or self.conflict.status == "PASS")
-        ) else "FAIL"
+        mem_ok = not self.memory or self.memory.status == "PASS"
+        conf_ok = not self.conflict or self.conflict.status == "PASS"
+        overall = "PASS" if mem_ok and conf_ok else "FAIL"
         lines.append(f"  OVERALL: {overall}")
 
         return "\n".join(lines)

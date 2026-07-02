@@ -20,6 +20,12 @@ from __future__ import annotations
 from typing import NamedTuple
 from .image_reader import Instruction
 
+__all__ = [
+    "OverlapKind",
+    "Conflict",
+    "ConflictCheckResult",
+    "ConflictChecker",
+]
 
 class OverlapKind:
     """Conflict type for diagnostic output."""

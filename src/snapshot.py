@@ -1,29 +1,38 @@
 """snapshot.py — save/load состояния пространства для тестовых фикстур.
 
-Адаптация DDAS ddas_snapshot_save/load (snapshot.c).
-
 Формат:
-  [tick_counter: uint64][space_data: space_bytes]
-
-Где space_data — raw дамп памяти пространства (бит-адресуемый массив).
+  [tick_counter: uint64][space_data: ...]
 """
 
 from __future__ import annotations
 import struct
-from .config import Config
+
+__all__ = [
+    "save_snapshot",
+    "load_snapshot",
+    "make_fixture",
+    "write_bits",
+]
 
 
-def save_snapshot(tick_counter: int, space_data: bytes, path: str) -> None:
+def save_snapshot(
+    tick_counter: int,
+    space_data: bytes,
+    path: str,
+    *,
+    space_bytes: int | None = None,
+) -> None:
     """Сохранить снапшот состояния пространства в файл.
 
     Args:
         tick_counter: номер текущего tick (uint64).
-        space_data: дамп пространства (space_bytes байт).
+        space_data: дамп пространства (байты).
         path: путь к файлу.
+        space_bytes: ожидаемый размер (если задан — проверяется).
     """
-    if len(space_data) != _get_space_bytes_from_config():
+    if space_bytes is not None and len(space_data) != space_bytes:
         raise ValueError(
-            f"space_data size {len(space_data)} != config space_bytes"
+            f"space_data size {len(space_data)} != expected {space_bytes}"
         )
 
     header = struct.pack("<Q", tick_counter)
@@ -42,22 +51,40 @@ def load_snapshot(path: str) -> tuple[int, bytes]:
         header = f.read(8)
         tick_counter = struct.unpack("<Q", header)[0]
         space_data = f.read()
-
     return tick_counter, space_data
 
 
-def _get_space_bytes_from_config() -> int:
-    """Получить размер пространства из дефолтного конфига."""
-    # Используем Config без файла (дефолтные значения)
-    from .config import Config
-    return Config().space_bytes
+def write_bits(
+    data: bytearray,
+    bit_offset: int,
+    width: int,
+    value: int,
+) -> None:
+    """Записать width бит value в data, MSB-first.
+
+    MSB-first: бит value (width-1) → позиция bit_offset.
+    Использует прямой побитовый доступ — корректен для fixture generation.
+    """
+    if width == 0:
+        return
+
+    for i in range(width):
+        bit_val = (value >> (width - 1 - i)) & 1
+        pos = bit_offset + i
+        byte_idx = pos >> 3
+        if byte_idx >= len(data):
+            break
+        bit_mask = 1 << (7 - (pos & 7))
+        if bit_val:
+            data[byte_idx] |= bit_mask
+        else:
+            data[byte_idx] &= ~bit_mask
 
 
 def make_fixture(
     instrs: list[tuple[int, int, int]],
     slot_size: int,
     space_bytes: int,
-    tick: int = 0,
 ) -> bytes:
     """Создать бинарный дамп пространства из списка инструкций.
 
@@ -65,41 +92,19 @@ def make_fixture(
         instrs: список (n, dst, src) для каждого слота.
         slot_size: размер слота в битах.
         space_bytes: общий размер пространства в байтах.
-        tick: номер tick.
 
     Returns:
         bytes: дамп пространства.
     """
     data = bytearray(space_bytes)
+    field_w = slot_size // 3
 
     for slot_idx, (n, dst, src) in enumerate(instrs):
         bit_offset = slot_idx * slot_size
-        byte_offset = bit_offset // 8
-
-        # Пропустить, если выходит за границы
-        if byte_offset + (slot_size // 8) + 1 > space_bytes:
+        if bit_offset + slot_size > space_bytes * 8:
             continue
-
-        # Записать n (slot_size // 3 бит на каждое поле — упрощение)
-        # В реальности используем ImageReader. Но для тестов достаточно заполнить.
-        _write_bits(data, byte_offset, bit_offset % 8, slot_size // 3, n)
-        _write_bits(data, byte_offset, bit_offset % 8 + slot_size // 3,
-                     slot_size // 3, dst)
-        _write_bits(data, byte_offset, bit_offset % 8 + 2 * (slot_size // 3),
-                     slot_size // 3, src)
+        write_bits(data, bit_offset + 0 * field_w, field_w, n)
+        write_bits(data, bit_offset + 1 * field_w, field_w, dst)
+        write_bits(data, bit_offset + 2 * field_w, field_w, src)
 
     return bytes(data)
-
-
-def _write_bits(data: bytearray, base_byte: int, bit_off: int, width: int,
-                value: int) -> None:
-    """Записать width бит value в data, MSB-first."""
-    for i in range(width - 1, -1, -1):
-        # Какой бит value пишем
-        bit_val = (value >> i) & 1
-        # Позиция в data
-        pos = (base_byte * 8) + bit_off + (width - 1 - i)
-        byte_idx = pos >> 3
-        bit_idx = 7 - (pos & 7)
-        if byte_idx < len(data):
-            data[byte_idx] = (data[byte_idx] & ~(1 << bit_idx)) | (bit_val << bit_idx)
