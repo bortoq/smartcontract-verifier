@@ -166,3 +166,37 @@ See [roadmap.md](roadmap.md) for current status and planned work.
 ## License
 
 MIT
+
+---
+
+## VM Runtime (C implementation)
+
+The `src/vm/` directory contains the reference implementation of the VM
+that actually executes `copy(n, dst, src)` instructions:
+
+```
+src/vm/
+  space.h / space.c    # VM core: init, MMIO handshake, tick execution
+  bitcpy.c             # bit-range copy with overlap-safe fallback
+  invariants.h/.c      # optional runtime checks (32-bit alignment)
+  Makefile             # builds libvm.a
+  test_vm.c            # minimal smoke test
+```
+
+Build with:
+
+```bash
+cd src/vm && make && make test
+```
+
+### Integration with the verifier
+
+See [docs/vm-integration.md](docs/vm-integration.md) for four integration strategies:
+
+1. **Property-based testing** — generate random images, verify + execute, compare.
+2. **Reference trace** — capture execution trace via hooks, verify offline.
+3. **Runtime verification** — embed L1/L2 checks into C for in-VM safety.
+4. **CI pipeline** — verify-then-run: reject invalid images before execution.
+
+The C runtime is ~700 lines (TCB). The verifier (Python) is ~400 lines.
+Together they form a complete formally-verifiable smart contract platform.
